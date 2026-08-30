@@ -1,12 +1,12 @@
 {*******************************************************************************
 *
-*  (C) COPYRIGHT AUTHORS, 2021 - 2022
+*  (C) COPYRIGHT AUTHORS, 2021 - 2026
 *
 *  TITLE:       nativesup.pas
 *
-*  VERSION:     1.02
+*  VERSION:     1.04
 *
-*  DATE:        15 Oct 2022
+*  DATE:        17 Aug 2026
 *
 *  Windows Native API support routines.
 *  ObjFPC variant, based on Win32Pascal WinNative of v1.43
@@ -26,7 +26,7 @@ interface
 uses
   Windows, SysUtils;
 
-{$calling stdcall}
+  {$calling stdcall}
 
 const
   ntdll = 'ntdll.dll';
@@ -181,7 +181,7 @@ const
   DIRECTORY_ALL_ACCESS = (STANDARD_RIGHTS_REQUIRED or DIRECTORY_QUERY or
     DIRECTORY_TRAVERSE or DIRECTORY_CREATE_OBJECT or DIRECTORY_CREATE_SUBDIRECTORY);
 
-{begin shitty borland modules definitions workaround}
+  {begin shitty borland modules definitions workaround}
 type
   PFNREADFILEPROC = function(hFile: THandle; lpBuffer: pointer;
     nNumberOfBytesToRead: DWORD; lpNumberOfBytesRead: PDWORD;
@@ -198,7 +198,7 @@ const
 var
   _ReadFile: PFNREADFILEPROC absolute pp1;
   _WriteFile: PFNWRITEFILEPROC absolute pp2;
-{end of shitty borland modules definitions workaround}
+  {end of shitty borland modules definitions workaround}
 
 type
   NTSTATUS = LONG;
@@ -212,16 +212,16 @@ type
   PCUSHORT = ^USHORT; { const }
   PCULONG = ^ULONG; { const }
 
-{$i ntstatus.inc}
+  {$i ntstatus.inc}
 
 function RegDeleteTreeW(hKey: HKEY; lpSubKey: LPCWSTR): LONG;
-  external 'advapi32' Name 'RegDeleteTreeW';
+  external 'advapi32' name 'RegDeleteTreeW';
 
 type
   _ANSI_STRING = record
     Length: word;
     MaximumLength: word;
-    Buffer: PAnsiChar;
+    Buffer: pansichar;
   end;
   ANSI_STRING = _ANSI_STRING;
   PANSI_STRING = ^_ANSI_STRING;
@@ -229,7 +229,7 @@ type
   _UNICODE_STRING = record
     Length: word;
     MaximumLength: word;
-    Buffer: PWideChar;
+    Buffer: pwidechar;
   end;
   UNICODE_STRING = _UNICODE_STRING;
   PUNICODE_STRING = ^_UNICODE_STRING;
@@ -552,7 +552,7 @@ type
 
 procedure RtlInitUnicodeString(
   {IN} DestinationString: PUNICODE_STRING;
-  {IN} const SourceString: PWideChar); stdcall; external ntdll;
+  {IN} const SourceString: pwidechar); stdcall; external ntdll;
 
 function RtlEqualUnicodeString(
   {IN} String1: PCUNICODE_STRING;
@@ -761,7 +761,7 @@ function ntsupCreateSymbolicLink(var LinkHanlde: THANDLE; LinkName: LPCWSTR;
   LinkTarget: LPCWSTR): NTSTATUS;
 
 function ntsupOpenDirectory(var DirectoryHandle: THANDLE;
-  RootDirectoryHandle: THANDLE; DirectoryName: PWidechar;
+  RootDirectoryHandle: THANDLE; DirectoryName: pwidechar;
   DesiredAccess: ACCESS_MASK): NTSTATUS;
 
 function ntsupGetCurrentProcessToken(): THANDLE;
@@ -769,17 +769,25 @@ function ntsupGetCurrentProcessToken(): THANDLE;
 type
   EnumObjectsContext = record
     UserContext: PVOID;
-    ObjectPathName: PWideChar;
+    ObjectPathName: pwidechar;
   end;
   PEnumObjectsContext = ^EnumObjectsContext;
 
   PEnumObjectsCallback = function(Entry: POBJECT_DIRECTORY_INFORMATION;
     Context: PEnumObjectsContext): BOOL; stdcall;
 
-function ntsupEnumerateObjects(RootDirectory: PWideChar;
+function ntsupEnumerateObjects(RootDirectory: pwidechar;
   CallbackProc: PEnumObjectsCallback; CallbackContext: PEnumObjectsContext): BOOL;
 
+function RtlTimeToSecondsSince1970(const p1: PSYSTEMTIME): DWORD;
+function RtlSecondsSince1970ToTime(dwSeconds: DWORD; p1: PSYSTEMTIME): Boolean;
+
 implementation
+
+const
+  spd = 86400;
+  mdays: array[0..11] of integer =
+    (31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31);
 
 procedure InitializeObjectAttributes(var aObjectAttr: OBJECT_ATTRIBUTES;
   aName: PUNICODE_STRING; aAttributes: ULONG; aRootDir: HANDLE;
@@ -880,7 +888,7 @@ begin
       exit;
     end;
 
-    Result := ntsupOpenDeviceEx(PWideChar(WideString(deviceLink)),
+    Result := ntsupOpenDeviceEx(pwidechar(WideString(deviceLink)),
       DesiredAccess, DeviceHandle);
 
   end
@@ -1028,9 +1036,8 @@ begin
   end;
 
   lpSubKey := PWideChar(WideString(S));
-
   keyHandle := 0;
-  lResult := RegOpenKeyEx(HKEY_LOCAL_MACHINE, nil, REG_OPTION_NON_VOLATILE,
+  lResult := RegOpenKeyExW(HKEY_LOCAL_MACHINE, nil, REG_OPTION_NON_VOLATILE,
     SERVICE_DELETE or KEY_ENUMERATE_SUB_KEYS or KEY_QUERY_VALUE, keyHandle);
 
   if (lResult = ERROR_SUCCESS) then
@@ -1087,7 +1094,7 @@ begin
   if not NT_SUCCESS(Result) then
     exit;
 
-  RtlInitUnicodeString(@usDrvKey, PWideChar(WideString(drvName)));
+  RtlInitUnicodeString(@usDrvKey, pwidechar(WideString(drvName)));
   Result := NtLoadDriver(@usDrvKey);
 
   if (UnloadPreviousInstance) then
@@ -1129,7 +1136,7 @@ begin
     exit;
   end;
 
-  RtlInitUnicodeString(@usDrvKey, PWideChar(WideString(drvName)));
+  RtlInitUnicodeString(@usDrvKey, pwidechar(WideString(drvName)));
   Result := NtLoadDriver(@usDrvKey);
 
   if (UnloadPreviousInstance) then
@@ -1185,12 +1192,12 @@ begin
   if not NT_SUCCESS(Result) then
     exit;
 
-  RtlInitUnicodeString(@usDrvKey, PWideChar(WideString(drvName)));
+  RtlInitUnicodeString(@usDrvKey, pwidechar(WideString(drvName)));
   Result := NtUnloadDriver(@usDrvKey);
 
   if (NT_SUCCESS(Result) and RemoveEntry) then
   begin
-    RegDeleteTreeW(HKEY_LOCAL_MACHINE, PWideChar(WideString(drvName[keyOffset])));
+    RegDeleteTreeW(HKEY_LOCAL_MACHINE, pwidechar(WideString(drvName[keyOffset])));
   end;
 
 end;
@@ -1217,7 +1224,7 @@ begin
     exit;
   end;
 
-  RtlInitUnicodeString(@usDrvKey, PWideChar(WideString(drvName)));
+  RtlInitUnicodeString(@usDrvKey, pwidechar(WideString(drvName)));
   Result := NtUnloadDriver(@usDrvKey);
 end;
 
@@ -1233,11 +1240,14 @@ begin
     exit;
   end;
 
-  RtlInitUnicodeString(@usLink, LinkName);
-  InitializeObjectAttributes(objAttr, @usLink, OBJ_CASE_INSENSITIVE, 0, nil);
-
-  Result := NtCreateSymbolicLinkObject(LinkHanlde, SYMBOLIC_LINK_ALL_ACCESS,
-    @objAttr, @usTarget);
+  try
+    RtlInitUnicodeString(@usLink, LinkName);
+    InitializeObjectAttributes(objAttr, @usLink, OBJ_CASE_INSENSITIVE, 0, nil);
+    Result := NtCreateSymbolicLinkObject(LinkHanlde, SYMBOLIC_LINK_ALL_ACCESS,
+      @objAttr, @usTarget);
+  finally
+    RtlFreeUnicodeString(@usTarget);
+  end;
 end;
 
 function ntsupGetCurrentProcessToken(): THANDLE;
@@ -1247,7 +1257,7 @@ begin
 end;
 
 function ntsupOpenDirectory(var DirectoryHandle: THANDLE;
-  RootDirectoryHandle: THANDLE; DirectoryName: PWidechar;
+  RootDirectoryHandle: THANDLE; DirectoryName: pwidechar;
   DesiredAccess: ACCESS_MASK): NTSTATUS;
 var
   status: NTSTATUS;
@@ -1270,7 +1280,7 @@ begin
 
 end;
 
-function ntsupEnumerateObjects(RootDirectory: PWideChar;
+function ntsupEnumerateObjects(RootDirectory: pwidechar;
   CallbackProc: PEnumObjectsCallback; CallbackContext: PEnumObjectsContext): BOOL;
 label
   ExitProc;
@@ -1282,7 +1292,7 @@ var
   infoBuffer: POBJECT_DIRECTORY_INFORMATION;
   usDirectory: UNICODE_STRING;
   sdlen: ULONG;
-  newdir, objname: PWideChar;
+  newdir, objname: pwidechar;
 begin
   bStop := False;
   Result := False;
@@ -1381,5 +1391,51 @@ begin
   ExitProc:
     NtClose(dirHandle);
 end;
+
+function RtlTimeToSecondsSince1970(const p1: PSYSTEMTIME): DWORD;
+var
+  days, c, s: integer;
+begin
+  days := p1^.wDay + ((p1^.wYear - 1972) div 4);
+  s := (days + (p1^.wYear - 1970) * 365) * spd;
+  for c := 1 to p1^.wMonth - 1 do
+    s := s + mdays[c - 1] * spd;
+  result := s + p1^.wHour * 3600 + p1^.wMinute * 60 + p1^.wSecond;
+end;
+
+function RtlSecondsSince1970ToTime(dwSeconds: DWORD; p1: PSYSTEMTIME): Boolean;
+var
+  days, c: integer;
+begin
+  p1^.wMilliseconds := 0;
+  p1^.wSecond := dwSeconds mod 60;
+  p1^.wMinute := (dwSeconds div 60) mod 60;
+  p1^.wHour := (dwSeconds div 3600) mod 24;
+
+  days := dwSeconds div spd;
+  p1^.wDayOfWeek := (days + 4) mod 7;
+  p1^.wDay := 1;
+  p1^.wMonth := 1;
+  p1^.wYear := 1970;
+  c := 0;
+  while (c < days) do
+  begin
+    inc(c);
+    inc(p1^.wDay);
+    if p1^.wDay > mdays[p1^.wMonth - 1] then
+      if not ((p1^.wYear mod 4 = 0) and (p1^.wMonth = 2) and (p1^.wDay = 29)) then
+      begin
+        inc(p1^.wMonth);
+        p1^.wDay := 1;
+      end;
+    if p1^.wMonth > 12 then
+    begin
+      inc(p1^.wYear);
+      p1^.wMonth := 1;
+    end;
+  end;
+  result := true;
+end;
+
 
 end.

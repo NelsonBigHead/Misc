@@ -1,12 +1,12 @@
 {*******************************************************************************
 *
-*  (C) COPYRIGHT AUTHORS, 2006 - 2021
+*  (C) COPYRIGHT AUTHORS, 2006 - 2026
 *
 *  TITLE:       scmsup.pas
 *
-*  VERSION:     5.51
+*  VERSION:     5.52
 *
-*  DATE:        17 May 2021
+*  DATE:        17 Aug 2026
 *
 *  SCM support routines for drivers load/unload.
 *  ObjFPC variant
@@ -58,7 +58,10 @@ function scmOpenManager(DesiredAccess: DWORD; var schSCManager: THANDLE;
   var lpStatus: DWORD): boolean;
 begin
   schSCManager := OpenSCManager(nil, nil, DesiredAccess);
-  lpStatus := GetLastError();
+  if schSCManager = 0 then
+    lpStatus := GetLastError()
+  else
+    lpStatus := ERROR_SUCCESS;
   Result := (lpStatus = ERROR_SUCCESS);
 end;
 
@@ -115,10 +118,13 @@ begin
     nil // no password
     );
 
-  lpStatus := GetLastError();
-
   if (schService <> 0) then
+  begin
     CloseServiceHandle(schService);
+    lpStatus := ERROR_SUCCESS;
+  end
+  else
+    lpStatus := GetLastError();
 
   Result := (lpStatus = ERROR_SUCCESS);
 end;
@@ -138,22 +144,28 @@ var
   schService: SC_HANDLE;
 begin
   schService := OpenService(SchSCManager, DriverName, SERVICE_ALL_ACCESS);
-
   lpStatus := GetLastError();
 
-  if (schService <> 0) then
+  if schService <> 0 then
   begin
     bResult := StartService(schService, 0, nil);
-    lpStatus := GetLastError();
-    if (lpStatus = ERROR_SERVICE_ALREADY_RUNNING) then
+    if bResult then
+      lpStatus := ERROR_SUCCESS
+    else
     begin
-      bResult := True;
-      lpStatus := ERROR_SUCCESS;
+      lpStatus := GetLastError();
+      if lpStatus = ERROR_SERVICE_ALREADY_RUNNING then
+      begin
+        bResult := True;
+        lpStatus := ERROR_SUCCESS;
+      end;
     end;
     CloseServiceHandle(schService);
-  end;
+  end
+  else
+    bResult := False;
 
-  Result := (bResult <> False);
+  Result := bResult;
 end;
 
 {*
@@ -173,34 +185,32 @@ var
   serviceStatus: SERVICE_STATUS;
 begin
   schService := OpenService(SchSCManager, DriverName, SERVICE_ALL_ACCESS);
-
   lpStatus := GetLastError();
-
   if (schService <> 0) then
   begin
     for iRetryCount := 5 downto 0 do
     begin
-
       SetLastError(ERROR_SUCCESS);
-
       ZeroMemory(@serviceStatus, sizeof(serviceStatus));
-
       bResult := ControlService(schService, SERVICE_CONTROL_STOP, serviceStatus);
+      if bResult then
+      begin
+        lpStatus := ERROR_SUCCESS;
+        break;
+      end;
 
       lpStatus := GetLastError();
-
-      if (bResult <> False) then
-        break;
-      if (lpStatus <> ERROR_DEPENDENT_SERVICES_RUNNING) then
+      if lpStatus <> ERROR_DEPENDENT_SERVICES_RUNNING then
         break;
 
       Sleep(1000);
-
     end;
     CloseServiceHandle(schService);
-  end;
+  end
+  else
+    bResult := False;
 
-  Result := (bResult <> False);
+  Result := bResult;
 end;
 
 {*
@@ -218,17 +228,21 @@ var
   schService: SC_HANDLE;
 begin
   schService := OpenService(SchSCManager, DriverName, SERVICE_ALL_ACCESS);
-
   lpStatus := GetLastError();
 
   if (schService <> 0) then
   begin
     bResult := DeleteService(schService);
-    lpStatus := GetLastError();
+    if bResult then
+      lpStatus := ERROR_SUCCESS
+    else
+      lpStatus := GetLastError();
     CloseServiceHandle(schService);
-  end;
+  end
+  else
+    bResult := False;
 
-  Result := (bResult <> False);
+  Result := bResult;
 end;
 
 {*
@@ -344,4 +358,3 @@ end;
 
 
 end.
-

@@ -1,12 +1,12 @@
 {*******************************************************************************
 *
-*  (C) COPYRIGHT AUTHORS, 2021 - 2023
+*  (C) COPYRIGHT AUTHORS, 2021 - 2026
 *
 *  TITLE:       Unit1.pas
 *
-*  VERSION:     1.00
+*  VERSION:     1.04
 *
-*  DATE:        13 Mar 2023
+*  DATE:        17 Aug 2026
 *
 *  MainForm implementation.
 *
@@ -26,8 +26,8 @@ interface
 
 uses
   Windows, ShellApi, Classes, SysUtils, Forms, Controls, Graphics,
-  Dialogs, StdCtrls, ComCtrls,
-  ExtCtrls, Spin, Buttons, Menus, LazFileUtils, scmsup, nativesup, Types;
+  Dialogs, StdCtrls, ComCtrls, ExtCtrls, Spin, Buttons, Menus,
+  LazFileUtils, scmsup, nativesup, Types, Clipbrd;
 
 type
 
@@ -153,7 +153,6 @@ type
     procedure EditIoctlValueChange(Sender: TObject);
     procedure FormCreate(Sender: TObject);
     procedure FormDropFiles(Sender: TObject; const FileNames: array of string);
-    procedure Image1Click(Sender: TObject);
     procedure IoctlSheetShow(Sender: TObject);
     procedure ListViewPrivSetMouseDown(Sender: TObject; Button: TMouseButton;
       Shift: TShiftState; X, Y: integer);
@@ -170,6 +169,7 @@ type
     procedure SpinEditInputBufferChange(Sender: TObject);
     procedure BuildIoCtl(Sender: TObject);
     procedure ElevateButtonClick(Sender: TObject);
+    procedure HexEditKeyDown(Sender: TObject; var Key: word; Shift: TShiftState);
   private
 
   public
@@ -182,12 +182,13 @@ const
 const
   PROGRAM_VERSION_MAJOR = 1;
   PROGRAM_VERSION_MINOR = 0;
-  PROGRAM_VERSION_BUILD = 2303;
+  PROGRAM_REVISION_NUMBER = 4;
+  PROGRAM_VERSION_BUILD = 2608;
   PROGRAM_COMPILER = 'Lazarus FPC v';
 
 var
   MainForm: TMainForm;
-  g_DataBuffer: PChar = nil;
+  g_DataBuffer: pchar = nil;
   g_DataSize: DWORD = 0;
 
 implementation
@@ -198,14 +199,17 @@ const
   DefaultDialogFilter: string = 'All files (*.*)|*.*';
   DrvLoadDialogFilter: string = 'Drivers (*.sys)|*.sys|All files (*.*)|*.*';
 
-{$R *.lfm}
+  {$R *.lfm}
+
 function RunAsAdmin(const ParentWindow: HWND; const FileName: string;
   const Parameters: string): boolean;
 var
   sei: TShellExecuteInfoW;
+  wsFile, wsParams: widestring;
 begin
-
   ZeroMemory(@sei, SizeOf(sei));
+  wsFile := WideString(FileName);
+  wsParams := WideString(Parameters);
 
   with sei do
   begin
@@ -213,9 +217,9 @@ begin
     Wnd := ParentWindow;
     fMask := SEE_MASK_FLAG_DDEWAIT or SEE_MASK_FLAG_NO_UI;
     lpVerb := 'runas';
-    lpFile := PWideChar(WideString(Filename));
+    lpFile := pwidechar(wsFile);
     if Parameters <> '' then
-      lpParameters := PWideChar(WideString(Parameters));
+      lpParameters := pwidechar(wsParams);
     nShow := SW_SHOWNORMAL;
   end;
 
@@ -232,7 +236,6 @@ var
   ptkGroups: PTokenGroups;
   dwLength, dwAttributes: DWORD;
 begin
-
   Result := False;
   tokenHandle := 0;
   adminSid := nil;
@@ -240,97 +243,103 @@ begin
   ptkGroups := nil;
 
   try
-
-    if (OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, tokenHandle)) then
+    if OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, tokenHandle) then
     begin
-
       Win32Check(AllocateAndInitializeSid(NtAuthority, 2,
         SECURITY_BUILTIN_DOMAIN_RID, DOMAIN_ALIAS_RID_ADMINS, 0, 0,
         0, 0, 0, 0, adminSid));
 
-      if (GetTokenInformation(tokenHandle, TokenGroups, nil, 0, @dwLength)) or
-        (GetLastError <> ERROR_INSUFFICIENT_BUFFER) then
-        RaiseLastOsError();
+      if not GetTokenInformation(tokenHandle, TokenGroups, nil, 0, @dwLength) then
+        if GetLastError <> ERROR_INSUFFICIENT_BUFFER then
+          RaiseLastOsError();
 
       ptkGroups := PTokenGroups(AllocMem(dwLength));
-
       Win32Check(GetTokenInformation(tokenHandle, TokenGroups,
         ptkGroups, dwLength, @dwLength));
 
-      {$r-}//range check off for anysize array
+      {$r-}
       for i := 0 to ptkGroups^.GroupCount - 1 do
       begin
-        if (EqualSid(adminSid, ptkGroups^.Groups[i].Sid)) then
+        if EqualSid(adminSid, ptkGroups^.Groups[i].Sid) then
         begin
-
           dwAttributes := ptkGroups^.Groups[i].Attributes;
-          if ((dwAttributes and SE_GROUP_ENABLED) = SE_GROUP_ENABLED) then
-            if ((dwAttributes and SE_GROUP_USE_FOR_DENY_ONLY) <>
-              SE_GROUP_USE_FOR_DENY_ONLY) then
-            begin
-              Result := True;
-              break;
-            end;
-
+          if ((dwAttributes and SE_GROUP_ENABLED) = SE_GROUP_ENABLED) and
+            ((dwAttributes and SE_GROUP_USE_FOR_DENY_ONLY) <>
+            SE_GROUP_USE_FOR_DENY_ONLY) then
+          begin
+            Result := True;
+            break;
+          end;
         end;
       end;
       {$r+}
     end;
-
   finally
-    if (tokenHandle <> 0) then
-      CloseHandle(tokenHandle);
-    if (adminSid <> nil) then
-      FreeSid(adminSid);
-    if (ptkGroups <> nil) then
-      FreeMem(ptkGroups);
+    if tokenHandle <> 0 then CloseHandle(tokenHandle);
+    if adminSid <> nil then FreeSid(adminSid);
+    if ptkGroups <> nil then FreeMem(ptkGroups);
   end;
-
 end;
 
-function ReadInputBuffer(FileName: string; var Buffer: PChar;
+function ReadInputBuffer(FileName: string; var Buffer: pchar;
   var BufferSize: DWORD): boolean;
 var
   fileHandle: THandle;
   bytesIO: DWORD;
+  fileSizeHigh: DWORD;
 begin
   Result := False;
-
-  fileHandle := CreateFileW(PWideChar(WideString(FileName)), GENERIC_READ,
+  Buffer := nil;
+  BufferSize := 0;
+  fileHandle := CreateFileW(pwidechar(WideString(FileName)), GENERIC_READ,
     FILE_SHARE_READ, nil, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, 0);
 
   if (fileHandle <> INVALID_HANDLE_VALUE) then
   begin
 
-    BufferSize := GetFileSize(fileHandle, nil);
+    BufferSize := GetFileSize(fileHandle, @fileSizeHigh);
 
-    if (BufferSize > 0) and (BufferSize < RTL_16MEG) then
+    if (BufferSize = INVALID_FILE_SIZE) and (GetLastError() <> NO_ERROR) then
+    begin
+      CloseHandle(fileHandle);
+      SetLastError(ERROR_INVALID_PARAMETER);
+      Exit;
+    end;
+
+    if (fileSizeHigh > 0) or (BufferSize >= RTL_16MEG) then
+    begin
+      SetLastError(ERROR_BUFFER_OVERFLOW);
+      CloseHandle(fileHandle);
+      Exit;
+    end;
+
+    if BufferSize > 0 then
     begin
       Buffer := PChar(HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, BufferSize));
-      if (Buffer <> nil) then
+      if Buffer <> nil then
       begin
         bytesIO := 0;
-        if (_ReadFile(fileHandle, Buffer, BufferSize, @bytesIO, nil)) then
-        begin
+        if _ReadFile(fileHandle, Buffer, BufferSize, @bytesIO, nil) then
           Result := (bytesIO = BufferSize);
+
+        // Free buffer if read failed or size mismatch
+        if not Result then
+        begin
+          HeapFree(GetProcessHeap(), 0, Buffer);
+          Buffer := nil;
         end;
       end;
     end
     else
     begin
-      if (BufferSize = 0) then
-        SetLastError(ERROR_INSUFFICIENT_BUFFER)
-      else
-      if (BufferSize >= RTL_16MEG) then
-        SetLastError(ERROR_BUFFER_OVERFLOW);
+      SetLastError(ERROR_INSUFFICIENT_BUFFER);
     end;
 
     CloseHandle(fileHandle);
-
   end;
 end;
 
-function WriteOutputBuffer(FileName: string; lpBuffer: PChar;
+function WriteOutputBuffer(FileName: string; lpBuffer: pchar;
   BufferSize: DWORD): boolean;
 var
   fileHandle: THandle;
@@ -338,7 +347,7 @@ var
 begin
   Result := False;
 
-  fileHandle := CreateFileW(PWideChar(WideString(FileName)), GENERIC_WRITE,
+  fileHandle := CreateFileW(pwidechar(WideString(FileName)), GENERIC_WRITE,
     0, nil, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, 0);
 
   if (fileHandle <> INVALID_HANDLE_VALUE) then
@@ -356,7 +365,7 @@ begin
   Result := (DeviceType shl 16) or (Access shl 14) or (FunctionCode shl 2) or Method;
 end;
 
-function HexToDword(S: string): longword;
+{function HexToDword(S: string): longword;
 var
   HexStr: string;
 begin
@@ -366,6 +375,30 @@ begin
     HexStr := S;
 
   Result := StrToDword(HexStr);
+end; }
+function HexToDword(S: string): longword;
+var
+  HexStr: string;
+begin
+  S := Trim(S);
+  if S = '' then
+  begin
+    Result := 0;
+    Exit;
+  end;
+
+  if (Length(S) >= 2) and ((Copy(S, 1, 2) = '0x') or (Copy(S, 1, 2) = '0X')) then
+    HexStr := '$' + Copy(S, 3, Length(S) - 2)
+  else if Pos('$', S) = 0 then
+    HexStr := '$' + S
+  else
+    HexStr := S;
+
+  try
+    Result := StrToDword(HexStr);
+  except
+    Result := 0;
+  end;
 end;
 
 { TMainForm }
@@ -382,11 +415,10 @@ var
   pusTypeName: PUNICODE_STRING;
 begin
   pusTypeName := PUNICODE_STRING(Context^.UserContext);
-  if (RtlEqualUnicodeString(@Entry^.TypeName, pusTypeName, True)) then
+  if RtlEqualUnicodeString(@Entry^.TypeName, pusTypeName, True) then
   begin
     MainForm.EditDeviceName.Items.Add(Context^.ObjectPathName);
   end;
-
   Result := False;
 end;
 
@@ -394,12 +426,17 @@ procedure TMainForm.BuildIoctl(Sender: TObject);
 var
   ioctl, devtype, method, funcid, access: DWORD;
 begin
-  devtype := HexToDword(EditDevType.Text);
-  method := ComboBoxIoMethod.ItemIndex;
-  funcid := HexToDword(EditFunctionId.Text);
-  access := ComboBoxIoAccess.ItemIndex;
-  ioctl := IoctlToCode(devtype, funcid, method, access);
-  EditIoctlValue.Text := IntToHex(ioctl, 8);
+  try
+    devtype := HexToDword(EditDevType.Text);
+    method := ComboBoxIoMethod.ItemIndex;
+    funcid := HexToDword(EditFunctionId.Text);
+    access := ComboBoxIoAccess.ItemIndex;
+    ioctl := IoctlToCode(devtype, funcid, method, access);
+    EditIoctlValue.Text := IntToHex(ioctl, 8);
+  except
+    on E: Exception do
+      PrintToLog('BuildIoctl Error: ' + E.Message);
+  end;
 end;
 
 procedure TMainForm.ButtonOpenFileClick(Sender: TObject);
@@ -439,7 +476,9 @@ begin
       editFile := EditNativeFileName;
       editName := EditNativeName;
       editDisplayName := EditNativeDisplayName;
-    end;
+    end
+    else
+      Exit;
 
     oldName := editFile.Text;
     if (OpenDialog1.FileName <> oldName) then
@@ -455,6 +494,47 @@ begin
   end;
 end;
 
+procedure TMainForm.HexEditKeyDown(Sender: TObject; var Key: word; Shift: TShiftState);
+var
+  Edit: TEdit;
+  ClipText: string;
+  MaxInsert: integer;
+begin
+  if (Key = Ord('V')) and (ssCtrl in Shift) then
+  begin
+    Edit := TEdit(Sender);
+    try
+      ClipText := Clipboard.AsText;
+
+      if (Length(ClipText) >= 2) and ((Copy(ClipText, 1, 2) = '0x') or
+        (Copy(ClipText, 1, 2) = '0X')) then
+      begin
+        Key := 0; // Cancel default paste
+
+        // Strip 0x/0X prefix
+        ClipText := Copy(ClipText, 3, Length(ClipText) - 2);
+
+        // Enforce MaxLength constraint
+        if Edit.MaxLength > 0 then
+        begin
+          MaxInsert := Edit.MaxLength - (Length(Edit.Text) - Edit.SelLength);
+          if MaxInsert < 0 then MaxInsert := 0;
+          if Length(ClipText) > MaxInsert then
+            ClipText := Copy(ClipText, 1, MaxInsert);
+        end;
+
+        // Perform manual paste
+        Edit.SelText := ClipText;
+
+        // Ensure dependent logic (like BuildIoctl) triggers after manual paste
+        if (Edit = EditDevType) or (Edit = EditFunctionId) then
+          BuildIoctl(Sender);
+      end;
+    except
+    end;
+  end;
+end;
+
 procedure TMainForm.SpinEditInputBufferChange(Sender: TObject);
 begin
   if (CheckBoxOutBuffer.Checked) then
@@ -465,7 +545,7 @@ procedure TMainForm.ManageInstalledDriverSCM(Sender: TObject);
 var
   schSCManager: SC_HANDLE;
   scmStatus: DWORD;
-  drvName: PChar;
+  drvName: LPCTSTR;
   drvEntryName: string;
 begin
 
@@ -483,7 +563,7 @@ begin
 
   try
 
-    drvName := PChar(drvEntryName);
+    drvName := LPCTSTR(drvEntryName);
 
     if scmOpenManager(SC_MANAGER_ALL_ACCESS, schSCManager, scmStatus) then
     begin
@@ -512,7 +592,8 @@ begin
 
   finally
     ShowStatus(scmStatus);
-    scmCloseManager(schSCManager, scmStatus);
+    if schSCManager <> 0 then
+      scmCloseManager(schSCManager, scmStatus);
   end;
 
 end;
@@ -530,10 +611,10 @@ end;
 
 procedure TMainForm.ShowStatus(Status: NTSTATUS);
 var
-  Buffer: PWideChar;
-  dwMessageId, Length, dwFlags: ULONG;
+  Buffer: pwidechar;
+  dwMessageId, Length: ULONG;
   hDll: HMODULE;
-  s: UnicodeString;
+  s: unicodestring;
 begin
   Buffer := nil;
 
@@ -545,29 +626,22 @@ begin
   else
     dwMessageId := DWORD(Status);
 
-  dwFlags := FORMAT_MESSAGE_ALLOCATE_BUFFER or FORMAT_MESSAGE_FROM_HMODULE;
-
   hDll := GetModuleHandle(ntdll);
-  Length := FormatMessageW(
-                    dwFlags,
-                    LPCVOID(hDll),
-                    dwMessageId,
-                    0,
-                    @Buffer,
-                    0,
-                    nil);
+  Length := FormatMessageW(FORMAT_MESSAGE_ALLOCATE_BUFFER or
+    FORMAT_MESSAGE_FROM_HMODULE, LPCVOID(hDll), dwMessageId, 0, @Buffer, 0, nil);
 
   try
-     while (Length > 0) and ((Buffer[Length - 1] <= WideChar(#32)) or
-       (Buffer[Length - 1] = WideChar('.'))) do Dec(Length);
+    while (Length > 0) and ((Buffer[Length - 1] <= widechar(#32)) or
+        (Buffer[Length - 1] = widechar('.'))) do Dec(Length);
 
-     SetString(s, Buffer, Length);
+    SetString(s, Buffer, Length);
 
-     PrintToLog(Format('Error code: %d', [Status]) + Format(' [0x%x]', [Status]));
-     PrintToLog(string(s));
+    PrintToLog(Format('Error code: %d', [Status]) + Format(' [0x%x]', [Status]));
+    PrintToLog(string(s));
 
   finally
-    LocalFree(HLOCAL(Buffer));
+    if Buffer <> nil then
+      LocalFree(HLOCAL(Buffer));
   end;
 end;
 
@@ -575,10 +649,10 @@ procedure TMainForm.ButtonNativeInstallClick(Sender: TObject);
 var
   StartType: DWORD;
   ErrorControl: DWORD;
-  DisplayName: PWideChar;
-  DrvName: PWideChar;
-  ImagePath: PWideChar;
-  SymLink: PWideChar;
+  DisplayName: pwidechar;
+  DrvName: pwidechar;
+  ImagePath: pwidechar;
+  SymLink: pwidechar;
   Status: NTSTATUS;
   SymLinkHandle: THANDLE;
   bSymLink: boolean;
@@ -606,7 +680,7 @@ begin
       exit;
     end;
 
-    SymLink := PWideChar(WideString(EditNativeSymLink.Text));
+    SymLink := pwidechar(WideString(EditNativeSymLink.Text));
 
     PrintToLog('Installing driver entry: ' + drvEntryName +
       ' using symbolic link ' + EditNativeSymLink.Text);
@@ -625,12 +699,12 @@ begin
 
   if (EditNativeDisplayName.Text <> '') then
   begin
-    DisplayName := PWideChar(WideString(EditNativeDisplayName.Text));
+    DisplayName := pwidechar(WideString(EditNativeDisplayName.Text));
   end;
 
   if (EditNativeFileName.Text <> '') then
   begin
-    ImagePath := PWideChar(WideString(EditNativeFileName.Text));
+    ImagePath := pwidechar(WideString(EditNativeFileName.Text));
   end;
 
   try
@@ -642,7 +716,7 @@ begin
     exit;
   end;
 
-  DrvName := PWideChar(WideString(S));
+  DrvName := pwidechar(WideString(S));
 
   if (bSymLink) then
   begin
@@ -652,6 +726,8 @@ begin
     begin
       Status := ntsupCreateDriverEntry(DrvName, ErrorControl, StartType,
         SymLink, DisplayName, False);
+      // NOTE: Handle intentionally NOT closed. Closing it would destroy the
+      // volatile symlink immediately as it has no other references.
     end;
   end
   else
@@ -666,7 +742,7 @@ end;
 
 procedure TMainForm.ButtonInBufferBrowseClick(Sender: TObject);
 var
-  lpBuffer: PChar;
+  lpBuffer: pchar;
   BufferSize: DWORD;
 begin
   case TComponent(Sender).Tag of
@@ -678,12 +754,10 @@ begin
         lpBuffer := nil;
         BufferSize := 0;
 
-        if (ReadInputBuffer(OpenDialog1.FileName, lpBuffer, BufferSize)) then
+        if ReadInputBuffer(OpenDialog1.FileName, lpBuffer, BufferSize) then
         begin
-          if (g_DataBuffer <> nil) then
-          begin
+          if g_DataBuffer <> nil then
             HeapFree(GetProcessHeap(), 0, g_DataBuffer);
-          end;
           g_DataBuffer := lpBuffer;
           g_DataSize := BufferSize;
           SpinEditInputBuffer.Value := BufferSize;
@@ -708,8 +782,6 @@ begin
         end;
       end;
     end;
-    else
-      exit;
   end;
 
 end;
@@ -722,7 +794,7 @@ var
   IoControlCode: DWORD;
   InputSize, OutputSize, sz: DWORD;
   devName, s: string;
-  InputBuffer, OutputBuffer: PChar;
+  InputBuffer, OutputBuffer: pchar;
   iost: IO_STATUS_BLOCK;
   dwError: DWORD;
   k: byte;
@@ -754,13 +826,13 @@ begin
 
     // Open device handle
     devHandle := 0;
-    Status := ntsupOpenDeviceEx(PWideChar(WideString(devName)),
+    Status := ntsupOpenDeviceEx(pwidechar(WideString(devName)),
       GENERIC_READ or GENERIC_WRITE, devHandle);
     if (not NT_SUCCESS(Status)) then
     begin
       PrintToLog('Failed to open ' + devName);
       ShowStatus(Status);
-      exit;
+      Exit;
     end;
 
     // Allocate input buffer
@@ -771,8 +843,10 @@ begin
       if (InputBuffer = nil) then
       begin
         dwError := GetLastError();
+        NtClose(devHandle);
         PrintToLog('InputBuffer is NULL');
         ShowStatus(dwError);
+        Exit;
       end;
     end
     else
@@ -797,8 +871,12 @@ begin
         if (OutputBuffer = nil) then
         begin
           dwError := GetLastError();
+          if InputBuffer <> nil then
+            HeapFree(processHeap, 0, InputBuffer);
+          NtClose(devHandle);
           PrintToLog('OutputBuffer is NULL');
           ShowStatus(dwError);
+          Exit;
         end;
       end
       else
@@ -822,11 +900,9 @@ begin
     begin
       // Otherwise use supplied data from file
       sz := InputSize;
-      if (sz > g_DataSize) then
-        sz := g_DataSize;
-
-      CopyMemory(InputBuffer, g_DataBuffer, sz);
-
+      if (sz > g_DataSize) then sz := g_DataSize;
+      if (g_DataBuffer <> nil) and (sz > 0) then
+        CopyMemory(InputBuffer, g_DataBuffer, sz);
     end;
 
     // Call driver
@@ -850,10 +926,11 @@ begin
         end;
     end;
 
-    if (not SingleBuffer) then
+    if (not SingleBuffer) and (OutputBuffer <> nil) then
       HeapFree(processHeap, 0, OutputBuffer);
 
-    HeapFree(processHeap, 0, InputBuffer);
+    if InputBuffer <> nil then
+      HeapFree(processHeap, 0, InputBuffer);
 
   except
     on E: Exception do
@@ -868,7 +945,8 @@ var
   osver: OSVERSIONINFOW;
 begin
   VersionLabel.Caption := IntToStr(PROGRAM_VERSION_MAJOR) + '.' +
-    IntToStr(PROGRAM_VERSION_MINOR) + '.' + IntToStr(PROGRAM_VERSION_BUILD);
+    IntToStr(PROGRAM_VERSION_MINOR) + '.' + IntToStr(PROGRAM_REVISION_NUMBER) +
+    '.' + IntToStr(PROGRAM_VERSION_BUILD);
 
   CompilerLabel.Caption := PROGRAM_COMPILER + {$I %FPCVERSION%};
   BuildDateLabel.Caption := {$I %DATE% } + ' ' + {$I %TIME%};
@@ -918,7 +996,7 @@ begin
   if (bForceLoad) then
     PrintToLog('Unload previous instance enabled');
 
-  Status := ntsupLoadDriver(PWideChar(WideString(drvName)), bForceLoad);
+  Status := ntsupLoadDriver(pwidechar(WideString(drvName)), bForceLoad);
 
   ShowStatus(Status);
 end;
@@ -940,7 +1018,7 @@ begin
 
   PrintToLog('Removing driver entry: ' + drvName);
 
-  Status := ntsupRemoveDriverEntry(PWideChar(WideString(drvName)));
+  Status := ntsupRemoveDriverEntry(pwidechar(WideString(drvName)));
   ShowStatus(Status);
 end;
 
@@ -960,7 +1038,7 @@ begin
 
   PrintToLog('Unloading driver: ' + drvName);
 
-  Status := ntsupUnloadDriver(PWideChar(WideString(drvName)));
+  Status := ntsupUnloadDriver(pwidechar(WideString(drvName)));
   ShowStatus(Status);
 
   if (Status = STATUS_OBJECT_NAME_NOT_FOUND) then
@@ -975,7 +1053,7 @@ procedure TMainForm.ButtonScmInstallClick(Sender: TObject);
 var
   schSCManager: SC_HANDLE;
   scmStatus: DWORD;
-  drvName, displayName, binaryPath: PChar;
+  drvName, displayName, binaryPath: pchar;
   drvEntryName: string;
 begin
 
@@ -1020,7 +1098,8 @@ begin
     ShowStatus(scmStatus);
 
   finally
-    scmCloseManager(schSCManager, scmStatus);
+    if schSCManager <> 0 then
+      scmCloseManager(schSCManager, scmStatus);
   end;
 
 end;
@@ -1053,7 +1132,7 @@ end;
 
 procedure TMainForm.EditIoCtlCodeKeyPress(Sender: TObject; var Key: char);
 begin
-  if not (Key in [#8, #22, 'a'..'f', 'A'..'F', '0'..'9']) then
+  if not (Key in [#8, #22, '$', 'a'..'f', 'A'..'F', '0'..'9']) then
   begin
     Key := #0;
   end;
@@ -1093,7 +1172,7 @@ begin
 
     on E: Exception do
     begin
-      PrintToLog(E.Message);
+      PrintToLog('EditIoctlValueChange Error: ' + E.Message);
     end;
 
   end;
@@ -1114,7 +1193,7 @@ begin
     if (ParamCount > 0) then
       i := StrToInt(ParamStr(1));
 
-    if (i < PageControl1.PageCount) then
+    if (i >= 0) and (i < PageControl1.PageCount) then
       PageControl1.ActivePageIndex := i
     else
       PageControl1.ActivePage := ScmTabSheet;
@@ -1126,10 +1205,10 @@ begin
   IsFullAdmin := IsCurrentUserFullAdmin();
   if (not IsFullAdmin) then
   begin
-    SendMessage(ButtonNativeInstall.Handle, BCM_SETSHIELD, WParam(0), LParam(True));
-    SendMessage(ButtonNativeLoad.Handle, BCM_SETSHIELD, WParam(0), LParam(True));
-    SendMessage(ButtonNativeUnload.Handle, BCM_SETSHIELD, WParam(0), LParam(True));
-    SendMessage(ButtonNativeRemove.Handle, BCM_SETSHIELD, WParam(0), LParam(True));
+    SendMessage(ButtonNativeInstall.Handle, BCM_SETSHIELD, WParam(0), LParam(1));
+    SendMessage(ButtonNativeLoad.Handle, BCM_SETSHIELD, WParam(0), LParam(1));
+    SendMessage(ButtonNativeUnload.Handle, BCM_SETSHIELD, WParam(0), LParam(1));
+    SendMessage(ButtonNativeRemove.Handle, BCM_SETSHIELD, WParam(0), LParam(1));
 
     ButtonNativeInstall.OnClick := @ElevateButtonClick;
     ButtonNativeLoad.OnClick := @ElevateButtonClick;
@@ -1141,6 +1220,10 @@ begin
     MainForm.Caption := MainForm.Caption + ' (elevated)';
   end;
 
+  // Handle copy-paste insertions.
+  EditDevType.OnKeyDown := @HexEditKeyDown;
+  EditFunctionId.OnKeyDown := @HexEditKeyDown;
+  EditIoctlValue.OnKeyDown := @HexEditKeyDown;
 
   // Fix for elevation.
 
@@ -1166,33 +1249,22 @@ begin
   l := Length(FileNames);
   if (l > 0) then
   begin
-
     drvName := ExtractFileName(FileNames[0]);
     drvNameNotExt := ExtractFileNameWithoutExt(drvName);
     if (PageControl1.ActivePage = ScmTabSheet) then
     begin
       EditScmFileName.Text := FileNames[0];
-      if (EditScmDisplayName.Text = '') then
-        EditScmDisplayName.Text := drvName;
-      if (EditScmName.Text = '') then
-        EditScmName.Text := drvNameNotExt;
+      if (EditScmDisplayName.Text = '') then EditScmDisplayName.Text := drvName;
+      if (EditScmName.Text = '') then EditScmName.Text := drvNameNotExt;
     end
     else
     if (PageControl1.ActivePage = NativeTabSheet) then
     begin
       EditNativeFileName.Text := FileNames[0];
-      if (EditNativeDisplayName.Text = '') then
-        EditNativeDisplayName.Text := drvName;
-      if (EditNativeName.Text = '') then
-        EditNativeName.Text := drvNameNotExt;
+      if (EditNativeDisplayName.Text = '') then EditNativeDisplayName.Text := drvName;
+      if (EditNativeName.Text = '') then  EditNativeName.Text := drvNameNotExt;
     end;
-
   end;
-end;
-
-procedure TMainForm.Image1Click(Sender: TObject);
-begin
-
 end;
 
 procedure TMainForm.IoctlSheetShow(Sender: TObject);
@@ -1201,12 +1273,12 @@ var
   enumContext: EnumObjectsContext;
 begin
   EditDeviceName.Items.Clear();
-  RtlInitUnicodeString(@usTypeName, PWideChar(OBJECT_TYPE_DEVICE));
+  RtlInitUnicodeString(@usTypeName, pwidechar(OBJECT_TYPE_DEVICE));
 
   enumContext.UserContext := @usTypeName;
   enumContext.ObjectPathName := nil;
 
-  ntsupEnumerateObjects(PwideChar('\'), PEnumObjectsCallback(@ObjectEnumProc),
+  ntsupEnumerateObjects(pwidechar('\'), PEnumObjectsCallback(@ObjectEnumProc),
     @enumContext);
 
   if (EditDeviceName.Items.Count > 0) then
@@ -1214,7 +1286,6 @@ begin
 end;
 
 function EnablePrivilegeByName(lpPrivilegeName: LPCTSTR; fEnable: boolean): DWORD;
-
 var
   TokenHandle: THANDLE;
   TokenPriv: TOKEN_PRIVILEGES;
@@ -1278,12 +1349,12 @@ begin
       if Assigned(Item) then
         if htOnStateIcon in GetHitTestInfoAt(X, Y) then
         begin
-          Status := EnablePrivilegeByName(PChar(Item.Caption), Item.Checked);
+          Status := EnablePrivilegeByName(PChar(Item.Caption), not Item.Checked);
           if (Status <> ERROR_SUCCESS) then
           begin
             Item.Checked := not Item.Checked;
             if (Status = ERROR_NOT_ALL_ASSIGNED) then
-              PrintToLog(PChar(Item.Caption) +
+              PrintToLog(Item.Caption +
                 ': The token does not have the specified privilege.')
             else
               ShowStatus(Status);
@@ -1312,8 +1383,7 @@ var
 begin
   if (not IsFullAdmin) then
   begin
-    LabelPrivInfo.Caption :=
-      'Hint: Elevation is required to access this page';
+    LabelPrivInfo.Caption := 'Hint: Elevation is required to access this page';
   end
   else
   begin
@@ -1337,7 +1407,7 @@ var
   TokenHandle: THANDLE;
   TokenPriv: PRIVILEGE_SET;
   i: integer;
-  fResult: boolean;
+  fResult: BOOL;
 begin
   TokenHandle := 0;
   if OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, TokenHandle) then
@@ -1359,9 +1429,7 @@ begin
         begin
           ListViewPrivSet.Items[i].StateIndex := integer(fResult);
         end;
-
       end;
-
     end;
 
     CloseHandle(TokenHandle);
@@ -1376,10 +1444,10 @@ begin
     LabelPrivInfoScm.Caption :=
       'Hint: Elevation is required to access this page';
 
-    SendMessage(ButtonScmInstall.Handle, BCM_SETSHIELD, WParam(0), LParam(True));
-    SendMessage(ButtonScmLoad.Handle, BCM_SETSHIELD, WParam(0), LParam(True));
-    SendMessage(ButtonScmUnload.Handle, BCM_SETSHIELD, WParam(0), LParam(True));
-    SendMessage(ButtonScmRemove.Handle, BCM_SETSHIELD, WParam(0), LParam(True));
+    SendMessage(ButtonScmInstall.Handle, BCM_SETSHIELD, WParam(0), LParam(1));
+    SendMessage(ButtonScmLoad.Handle, BCM_SETSHIELD, WParam(0), LParam(1));
+    SendMessage(ButtonScmUnload.Handle, BCM_SETSHIELD, WParam(0), LParam(1));
+    SendMessage(ButtonScmRemove.Handle, BCM_SETSHIELD, WParam(0), LParam(1));
 
     ButtonScmInstall.OnClick := @ElevateButtonClick;
     ButtonScmLoad.OnClick := @ElevateButtonClick;
