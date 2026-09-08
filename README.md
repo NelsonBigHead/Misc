@@ -34,6 +34,9 @@ source\ROS
     * sources\ROS\srvany2
 Run application as service
 
+source\RTL\fpc
+* FreePascal modules used by legacy projects
+
 source\RTL\ntos
 * NTOS header and NTSUP RTL playground and template project.
 
